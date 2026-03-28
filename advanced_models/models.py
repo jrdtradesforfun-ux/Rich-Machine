@@ -11,29 +11,107 @@ from tensorflow.keras.optimizers import Adam
 import joblib
 import os
 
+# ONNX support
+try:
+    import tf2onnx
+    import onnxruntime as ort
+    ONNX_AVAILABLE = True
+except ImportError:
+    ONNX_AVAILABLE = False
+    print("⚠️ ONNX libraries not available. Install: pip install tf2onnx onnxruntime")
+
 class BasePredictor:
-    """Base class for ML predictors"""
-    
+    """Base class for ML predictors with ONNX support"""
+
     def __init__(self, model_name: str):
         self.model_name = model_name
         self.model = None
         self.is_trained = False
-        
+        self.onnx_session = None
+        self.onnx_path = None
+
     def train(self, X: np.ndarray, y: np.ndarray) -> Dict[str, Any]:
         """Train the model"""
         raise NotImplementedError
-        
+
     def predict(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Predict and return probabilities"""
         raise NotImplementedError
-        
+
     def save_model(self, path: str):
         """Save model to disk"""
         raise NotImplementedError
-        
+
     def load_model(self, path: str):
         """Load model from disk"""
         raise NotImplementedError
+
+    def export_to_onnx(self, output_path: str, input_sample: np.ndarray = None) -> bool:
+        """
+        Export model to ONNX format for MQL5 integration
+
+        Args:
+            output_path: Path to save ONNX model
+            input_sample: Sample input for model conversion
+
+        Returns:
+            bool: True if export successful
+        """
+        if not ONNX_AVAILABLE:
+            print("❌ ONNX libraries not available")
+            return False
+
+        try:
+            if self.model_name == "lstm" and hasattr(self, '_export_lstm_to_onnx'):
+                return self._export_lstm_to_onnx(output_path, input_sample)
+            elif self.model_name in ["rf", "xgb"] and hasattr(self, '_export_tree_to_onnx'):
+                return self._export_tree_to_onnx(output_path, input_sample)
+            else:
+                print(f"❌ ONNX export not supported for {self.model_name}")
+                return False
+        except Exception as e:
+            print(f"❌ ONNX export failed: {e}")
+            return False
+
+    def load_onnx_model(self, onnx_path: str):
+        """Load ONNX model for inference"""
+        if not ONNX_AVAILABLE:
+            print("❌ ONNX runtime not available")
+            return False
+
+        try:
+            self.onnx_session = ort.InferenceSession(onnx_path)
+            self.onnx_path = onnx_path
+            print(f"✅ ONNX model loaded: {onnx_path}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to load ONNX model: {e}")
+            return False
+
+    def predict_onnx(self, X: np.ndarray) -> np.ndarray:
+        """Run inference using ONNX model"""
+        if not self.onnx_session:
+            raise ValueError("ONNX model not loaded")
+
+        try:
+            # Prepare input
+            input_name = self.onnx_session.get_inputs()[0].name
+            X_reshaped = X.astype(np.float32)
+
+            # Run inference
+            result = self.onnx_session.run(None, {input_name: X_reshaped})
+
+            # Return prediction (assuming binary classification)
+            if len(result) == 1:
+                # Single output (probabilities)
+                return result[0]
+            else:
+                # Multiple outputs (classes and probabilities)
+                return result[1] if len(result) > 1 else result[0]
+
+        except Exception as e:
+            print(f"❌ ONNX inference failed: {e}")
+            return np.array([])
 
 class RandomForestPredictor(BasePredictor):
     """Random Forest Classifier for trading signals"""
@@ -84,6 +162,32 @@ class RandomForestPredictor(BasePredictor):
         """Load model"""
         self.model = joblib.load(path)
         self.is_trained = True
+
+    def _export_tree_to_onnx(self, output_path: str, input_sample: np.ndarray = None) -> bool:
+        """Export tree-based models (RF, XGB) to ONNX"""
+        if input_sample is None:
+            # Create sample input based on model
+            n_features = self.model.n_features_in_
+            input_sample = np.random.randn(1, n_features).astype(np.float32)
+
+        try:
+            from skl2onnx import convert_sklearn
+            from skl2onnx.common.data_types import FloatTensorType
+
+            # Convert to ONNX
+            initial_type = [('input', FloatTensorType([None, input_sample.shape[1]]))]
+            onnx_model = convert_sklearn(self.model, initial_types=initial_type)
+
+            # Save ONNX model
+            with open(output_path, "wb") as f:
+                f.write(onnx_model.SerializeToString())
+
+            print(f"✅ ONNX model exported: {output_path}")
+            return True
+
+        except Exception as e:
+            print(f"❌ Tree ONNX export failed: {e}")
+            return False
 
 class XGBoostPredictor(BasePredictor):
     """XGBoost Classifier for trading signals"""
@@ -230,6 +334,34 @@ class LSTMPredictor(BasePredictor):
         from tensorflow.keras.models import load_model
         self.model = load_model(path)
         self.is_trained = True
+
+    def _export_lstm_to_onnx(self, output_path: str, input_sample: np.ndarray = None) -> bool:
+        """Export LSTM model to ONNX"""
+        if input_sample is None:
+            # Create sample input based on sequence length
+            input_sample = np.random.randn(1, self.sequence_length, self.n_features).astype(np.float32)
+
+        try:
+            # Convert to ONNX using tf2onnx
+            import tf2onnx
+
+            # Get model spec
+            spec = (tf.TensorSpec(input_sample.shape, tf.float32, name="input"),)
+
+            # Convert model
+            onnx_model, _ = tf2onnx.convert.from_keras(
+                self.model,
+                input_signature=spec,
+                opset=13,
+                output_path=output_path
+            )
+
+            print(f"✅ LSTM ONNX model exported: {output_path}")
+            return True
+
+        except Exception as e:
+            print(f"❌ LSTM ONNX export failed: {e}")
+            return False
 
 def create_feature_engineering_pipeline() -> Dict[str, Any]:
     """

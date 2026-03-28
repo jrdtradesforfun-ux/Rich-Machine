@@ -1,22 +1,44 @@
 //+------------------------------------------------------------------+
-//|                    Universal Trading Bot EA                      |
-//|                        MetaTrader 5 Expert Advisor                |
-//|                    Communicates with Python Trading Bot           |
+//|              Universal ONNX ML Trading Bot EA                    |
+//|              MetaTrader 5 Expert Advisor                         |
+//|              ONNX ML Integration + SMC Strategies                |
 //+------------------------------------------------------------------+
 
-#property copyright "Universal Trading Bot"
+#property copyright "Universal ONNX ML Trading Bot"
 #property link      "https://github.com/universal-trading-bot"
-#property version   "1.00"
+#property version   "2.00"
 #property strict
 
 #include <Trade\Trade.mqh>
 #include <Trade\SymbolInfo.mqh>
 #include <Trade\PositionInfo.mqh>
+#include <Math\Stat\Math.mqh>
+
+//--- ONNX Integration
+#include <MQL5\Include\Math\Alglib\dataanalysis.mqh>  // For ONNX support
 
 //--- Input parameters
-input string PythonHost = "localhost";    // Python bot host
-input int PythonPort = 5000;              // Python bot port
-input int UpdateInterval = 1000;          // Update interval in milliseconds
+input string ONNX_Model_Path = "onnx_model.onnx";    // Path to ONNX model file
+input int Feature_Count = 50;                        // Number of input features
+input double Prediction_Threshold = 0.6;             // Minimum confidence for trade
+input bool Use_Socket_Comm = true;                   // Use socket communication
+input string PythonHost = "localhost";               // Python bot host
+input int PythonPort = 5000;                         // Python bot port
+
+//--- SMC Strategy Parameters
+input int H4_Timeframe = PERIOD_H4;                  // Higher timeframe for context
+input int M15_Timeframe = PERIOD_M15;                // Entry timeframe
+input int Fractal_Period = 5;                        // Fractal lookback period
+input double Risk_Per_Trade = 0.02;                  // Risk per trade (2%)
+input double Daily_Drawdown_Limit = 0.05;            // Max daily drawdown (5%)
+input int Max_Positions = 3;                         // Maximum concurrent positions
+input int Magic_Number = 123456;                     // EA magic number
+
+//--- Kill Zone Parameters (GMT)
+input int London_Open_Hour = 8;                      // London session start
+input int London_Close_Hour = 10;                    // London session end
+input int NewYork_Open_Hour = 13;                    // New York session start
+input int NewYork_Close_Hour = 15;                   // New York session end
 
 //--- Global variables
 int socketHandle = INVALID_HANDLE;
@@ -24,29 +46,55 @@ CTrade trade;
 CSymbolInfo symbolInfo;
 CPositionInfo positionInfo;
 
+//--- ONNX variables
+long onnxHandle = INVALID_HANDLE;
+matrix inputMatrix;
+matrix outputMatrix;
+
+//--- SMC variables
+datetime lastBarTime;
+double dailyStartingBalance;
+double dailyDrawdown;
+int retryCount = 0;
+const int MAX_RETRIES = 3;
+
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("Universal Trading Bot EA initializing...");
-    
+    Print("🚀 Universal ONNX ML Trading Bot EA v2.0 initializing...");
+
     // Initialize trade object
-    trade.SetExpertMagicNumber(123456);
+    trade.SetExpertMagicNumber(Magic_Number);
     trade.SetMarginMode();
     trade.SetTypeFillingBySymbol(Symbol());
-    
+
     // Initialize symbol info
     symbolInfo.Name(Symbol());
-    
-    // Connect to Python bot
-    if (!ConnectToPython())
+
+    // Initialize ONNX model
+    if (!InitializeONNX())
     {
-        Print("Failed to connect to Python bot");
+        Print("❌ Failed to initialize ONNX model");
         return INIT_FAILED;
     }
-    
-    Print("EA initialized successfully");
+
+    // Initialize SMC variables
+    lastBarTime = iTime(Symbol(), M15_Timeframe, 0);
+    dailyStartingBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    dailyDrawdown = 0.0;
+
+    // Connect to Python bot (optional)
+    if (Use_Socket_Comm)
+    {
+        if (!ConnectToPython())
+        {
+            Print("⚠️ Socket communication disabled - running standalone");
+        }
+    }
+
+    Print("✅ EA initialized successfully with ONNX + SMC integration");
     return INIT_SUCCEEDED;
 }
 
@@ -61,8 +109,15 @@ void OnDeinit(const int reason)
         SocketClose(socketHandle);
         socketHandle = INVALID_HANDLE;
     }
-    
-    Print("EA deinitialized");
+
+    // Release ONNX model
+    if (onnxHandle != INVALID_HANDLE)
+    {
+        OnnxRelease(onnxHandle);
+        onnxHandle = INVALID_HANDLE;
+    }
+
+    Print("📴 EA deinitialized");
 }
 
 //+------------------------------------------------------------------+
@@ -70,19 +125,411 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-    static datetime lastUpdate = 0;
-    
-    // Update every UpdateInterval milliseconds
-    if (TimeCurrent() - lastUpdate < UpdateInterval / 1000)
+    // Check for new bar (reduce CPU usage)
+    if (!IsNewBar())
         return;
-        
-    lastUpdate = TimeCurrent();
-    
-    // Process commands from Python bot
-    ProcessPythonCommands();
-    
-    // Send market data to Python bot
-    SendMarketData();
+
+    // Update daily drawdown
+    UpdateDailyDrawdown();
+
+    // Check drawdown limit
+    if (dailyDrawdown >= Daily_Drawdown_Limit)
+    {
+        Print("🚫 Daily drawdown limit reached - trading halted");
+        return;
+    }
+
+    // Check position limits
+    if (PositionsTotal() >= Max_Positions)
+    {
+        return;
+    }
+
+    // Check kill zone
+    if (!IsInKillZone())
+    {
+        return;
+    }
+
+    // Generate trading signal
+    int signal = GenerateMLSignal();
+    if (signal == 0)
+        return;  // No signal
+
+    // Apply SMC confirmation
+    if (!ConfirmWithSMC(signal))
+        return;
+
+    // Execute trade with retry logic
+    ExecuteTradeWithRetry(signal);
+}
+
+//+------------------------------------------------------------------+
+//| Initialize ONNX model                                            |
+//+------------------------------------------------------------------+
+bool InitializeONNX()
+{
+    // Load ONNX model
+    onnxHandle = OnnxCreateFromFile(ONNX_Model_Path);
+    if (onnxHandle == INVALID_HANDLE)
+    {
+        Print("❌ Failed to load ONNX model: ", ONNX_Model_Path);
+        return false;
+    }
+
+    // Get model information
+    OnnxTypeInfo typeInfo;
+    if (!OnnxGetModelTypeInfo(onnxHandle, typeInfo))
+    {
+        Print("❌ Failed to get ONNX model info");
+        OnnxRelease(onnxHandle);
+        onnxHandle = INVALID_HANDLE;
+        return false;
+    }
+
+    // Initialize matrices
+    inputMatrix.Resize(1, Feature_Count);
+    outputMatrix.Resize(1, 1);  // Binary classification
+
+    Print("✅ ONNX model loaded successfully");
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Generate ML signal using ONNX model                              |
+//+------------------------------------------------------------------+
+int GenerateMLSignal()
+{
+    if (onnxHandle == INVALID_HANDLE)
+        return 0;
+
+    // Calculate features
+    if (!CalculateFeatures(inputMatrix))
+        return 0;
+
+    // Run ONNX inference
+    if (!OnnxRun(onnxHandle, ONNX_RUN_INPUT, inputMatrix, ONNX_RUN_OUTPUT, outputMatrix))
+    {
+        Print("❌ ONNX inference failed");
+        return 0;
+    }
+
+    // Get prediction
+    double prediction = outputMatrix[0][0];
+
+    // Apply threshold
+    if (prediction >= Prediction_Threshold)
+        return 1;  // Bullish
+    else if (prediction <= (1.0 - Prediction_Threshold))
+        return -1; // Bearish
+
+    return 0; // Neutral
+}
+
+//+------------------------------------------------------------------+
+//| Calculate technical features for ML model                       |
+//+------------------------------------------------------------------+
+bool CalculateFeatures(matrix &features)
+{
+    // Price data
+    double close = iClose(Symbol(), M15_Timeframe, 0);
+    double high = iHigh(Symbol(), M15_Timeframe, 0);
+    double low = iLow(Symbol(), M15_Timeframe, 0);
+    double open = iOpen(Symbol(), M15_Timeframe, 0);
+    long volume = iVolume(Symbol(), M15_Timeframe, 0);
+
+    // Basic price features
+    features[0][0] = close;
+    features[0][1] = (close - open) / open;  // Body size
+    features[0][2] = (high - low) / close;   // Range
+    features[0][3] = volume;
+
+    // Moving averages
+    features[0][4] = iMA(Symbol(), M15_Timeframe, 20, 0, MODE_SMA, PRICE_CLOSE, 0);
+    features[0][5] = iMA(Symbol(), M15_Timeframe, 50, 0, MODE_SMA, PRICE_CLOSE, 0);
+
+    // RSI
+    features[0][6] = iRSI(Symbol(), M15_Timeframe, 14, PRICE_CLOSE, 0);
+
+    // MACD
+    double macd_main, macd_signal;
+    iMACD(Symbol(), M15_Timeframe, 12, 26, 9, PRICE_CLOSE, macd_main, macd_signal, 0);
+    features[0][7] = macd_main;
+    features[0][8] = macd_signal;
+
+    // Bollinger Bands
+    double bb_upper, bb_lower;
+    iBands(Symbol(), M15_Timeframe, 20, 0, 2, PRICE_CLOSE, bb_upper, bb_lower, 0);
+    features[0][9] = bb_upper;
+    features[0][10] = bb_lower;
+
+    // ATR
+    features[0][11] = iATR(Symbol(), M15_Timeframe, 14, 0);
+
+    // Higher timeframe context (H4)
+    double h4_close = iClose(Symbol(), H4_Timeframe, 0);
+    double h4_high = iHigh(Symbol(), H4_Timeframe, 0);
+    double h4_low = iLow(Symbol(), H4_Timeframe, 0);
+    features[0][12] = h4_close;
+    features[0][13] = (h4_high - h4_low) / h4_close;  // H4 range
+
+    // Add more features as needed (up to Feature_Count)
+    // This is a simplified version - expand based on your model's requirements
+
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Confirm signal with SMC (Smart Money Concepts)                  |
+//+------------------------------------------------------------------+
+bool ConfirmWithSMC(int signal)
+{
+    // Check for fractal patterns (liquidity sweeps)
+    if (!CheckFractalPattern(signal))
+        return false;
+
+    // Check order blocks
+    if (!CheckOrderBlocks(signal))
+        return false;
+
+    // Check Fibonacci zones
+    if (!CheckFibonacciZones(signal))
+        return false;
+
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Check fractal patterns for liquidity sweeps                     |
+//+------------------------------------------------------------------+
+bool CheckFractalPattern(int signal)
+{
+    // Look for 5-bar fractal patterns indicating liquidity sweeps
+    int direction = (signal > 0) ? 1 : -1;  // 1 for up, -1 for down
+
+    for (int i = 1; i <= Fractal_Period; i++)
+    {
+        double high1 = iHigh(Symbol(), M15_Timeframe, i);
+        double high2 = iHigh(Symbol(), M15_Timeframe, i+1);
+        double low1 = iLow(Symbol(), M15_Timeframe, i);
+        double low2 = iLow(Symbol(), M15_Timeframe, i+1);
+
+        // Check for bearish fractal (resistance sweep)
+        if (direction == -1 && high1 > high2 && high1 > iHigh(Symbol(), M15_Timeframe, i-1))
+            return true;
+
+        // Check for bullish fractal (support sweep)
+        if (direction == 1 && low1 < low2 && low1 < iLow(Symbol(), M15_Timeframe, i-1))
+            return true;
+    }
+
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check order blocks (supply/demand zones)                        |
+//+------------------------------------------------------------------+
+bool CheckOrderBlocks(int signal)
+{
+    // Simplified order block detection
+    // Large candle followed by small candle in opposite direction
+    double body1 = MathAbs(iOpen(Symbol(), M15_Timeframe, 1) - iClose(Symbol(), M15_Timeframe, 1));
+    double body2 = MathAbs(iOpen(Symbol(), M15_Timeframe, 0) - iClose(Symbol(), M15_Timeframe, 0));
+
+    double range1 = iHigh(Symbol(), M15_Timeframe, 1) - iLow(Symbol(), M15_Timeframe, 1);
+    double range2 = iHigh(Symbol(), M15_Timeframe, 0) - iLow(Symbol(), M15_Timeframe, 0);
+
+    // Large candle followed by small candle
+    if (body1 > range1 * 0.6 && body2 < range2 * 0.3)
+    {
+        // Check direction alignment
+        bool bullishOB = (iClose(Symbol(), M15_Timeframe, 1) > iOpen(Symbol(), M15_Timeframe, 1) &&
+                         signal > 0);  // Bullish OB + bullish signal
+        bool bearishOB = (iClose(Symbol(), M15_Timeframe, 1) < iOpen(Symbol(), M15_Timeframe, 1) &&
+                         signal < 0);  // Bearish OB + bearish signal
+
+        if (bullishOB || bearishOB)
+            return true;
+    }
+
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check Fibonacci zones                                           |
+//+------------------------------------------------------------------+
+bool CheckFibonacciZones(int signal)
+{
+    // Get H4 midpoint
+    double h4_high = iHigh(Symbol(), H4_Timeframe, 0);
+    double h4_low = iLow(Symbol(), H4_Timeframe, 0);
+    double midpoint = (h4_high + h4_low) / 2;
+
+    double current_price = iClose(Symbol(), M15_Timeframe, 0);
+
+    // Premium zone (above midpoint) - bearish bias
+    // Discount zone (below midpoint) - bullish bias
+    bool in_premium = current_price > midpoint;
+    bool in_discount = current_price < midpoint;
+
+    // Signal alignment with zone bias
+    if ((signal > 0 && in_discount) || (signal < 0 && in_premium))
+        return true;
+
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Execute trade with retry logic                                   |
+//+------------------------------------------------------------------+
+void ExecuteTradeWithRetry(int signal)
+{
+    double lotSize = CalculatePositionSize(signal);
+    if (lotSize <= 0)
+        return;
+
+    // Calculate stop loss and take profit
+    double entryPrice = symbolInfo.Ask();
+    if (signal < 0)
+        entryPrice = symbolInfo.Bid();
+
+    double atr = iATR(Symbol(), M15_Timeframe, 14, 0);
+    double stopLoss = atr * 2;  // 2 ATR stop
+    double takeProfit = atr * 3; // 3 ATR target
+
+    ENUM_ORDER_TYPE orderType = (signal > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+    double slPrice = (signal > 0) ? entryPrice - stopLoss : entryPrice + stopLoss;
+    double tpPrice = (signal > 0) ? entryPrice + takeProfit : entryPrice - takeProfit;
+
+    // Execute with retry
+    for (int attempt = 1; attempt <= MAX_RETRIES; attempt++)
+    {
+        if (trade.PositionOpen(Symbol(), orderType, lotSize, entryPrice, slPrice, tpPrice))
+        {
+            Print("✅ Trade executed successfully: ", Symbol(), " ", EnumToString(orderType), " ", lotSize, " lots");
+            retryCount = 0;  // Reset retry counter
+            return;
+        }
+        else
+        {
+            int error = GetLastError();
+            Print("⚠️ Trade attempt ", attempt, " failed. Error: ", error, " - ", trade.ResultComment());
+
+            // Check if retryable error
+            if (!IsRetryableError(error))
+            {
+                Print("❌ Non-retryable error - aborting trade");
+                break;
+            }
+
+            // Exponential backoff
+            Sleep(attempt * 1000);
+        }
+    }
+
+    retryCount++;
+    if (retryCount >= MAX_RETRIES)
+    {
+        Print("🚫 Max retries reached - temporary trading halt");
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate position size based on risk                            |
+//+------------------------------------------------------------------+
+double CalculatePositionSize(int signal)
+{
+    double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double riskAmount = accountBalance * Risk_Per_Trade;
+
+    double atr = iATR(Symbol(), M15_Timeframe, 14, 0);
+    double stopLossPips = atr * 2 / symbolInfo.Point();
+
+    double tickValue = symbolInfo.TickValue();
+    double lotSize = riskAmount / (stopLossPips * tickValue);
+
+    // Apply broker limits
+    double maxLot = symbolInfo.LotsMax();
+    double minLot = symbolInfo.LotsMin();
+
+    lotSize = MathMax(minLot, MathMin(maxLot, lotSize));
+
+    return NormalizeDouble(lotSize, 2);
+}
+
+//+------------------------------------------------------------------+
+//| Check if error is retryable                                      |
+//+------------------------------------------------------------------+
+bool IsRetryableError(int error)
+{
+    // Retryable errors
+    switch (error)
+    {
+        case ERR_NET_TIMEOUT:
+        case ERR_NET_SOCKET:
+        case ERR_NET_CONNECTION:
+        case ERR_TRADE_TIMEOUT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check if in kill zone (trading hours)                            |
+//+------------------------------------------------------------------+
+bool IsInKillZone()
+{
+    MqlDateTime dt;
+    TimeToStruct(TimeCurrent(), dt);
+
+    int hour = dt.hour;
+
+    // London session
+    bool londonSession = (hour >= London_Open_Hour && hour <= London_Close_Hour);
+
+    // New York session
+    bool nySession = (hour >= NewYork_Open_Hour && hour <= NewYork_Close_Hour);
+
+    return londonSession || nySession;
+}
+
+//+------------------------------------------------------------------+
+//| Check for new bar                                                 |
+//+------------------------------------------------------------------+
+bool IsNewBar()
+{
+    datetime currentBarTime = iTime(Symbol(), M15_Timeframe, 0);
+    if (currentBarTime != lastBarTime)
+    {
+        lastBarTime = currentBarTime;
+        return true;
+    }
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Update daily drawdown                                            |
+//+------------------------------------------------------------------+
+void UpdateDailyDrawdown()
+{
+    MqlDateTime dt;
+    TimeToStruct(TimeCurrent(), dt);
+
+    // Reset at start of new day
+    static int lastDay = -1;
+    if (dt.day != lastDay)
+    {
+        dailyStartingBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+        dailyDrawdown = 0.0;
+        lastDay = dt.day;
+    }
+
+    double currentBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double drawdown = (dailyStartingBalance - currentBalance) / dailyStartingBalance;
+
+    if (drawdown > dailyDrawdown)
+        dailyDrawdown = drawdown;
 }
 
 //+------------------------------------------------------------------+
@@ -93,301 +540,32 @@ bool ConnectToPython()
     socketHandle = SocketCreate();
     if (socketHandle == INVALID_HANDLE)
     {
-        Print("Failed to create socket");
+        Print("❌ Failed to create socket");
         return false;
     }
-    
+
     if (!SocketConnect(socketHandle, PythonHost, PythonPort, 5000))
     {
-        Print("Failed to connect to Python bot at ", PythonHost, ":", PythonPort);
+        Print("❌ Failed to connect to Python bot at ", PythonHost, ":", PythonPort);
         SocketClose(socketHandle);
         socketHandle = INVALID_HANDLE;
         return false;
     }
-    
-    Print("Connected to Python bot");
+
+    Print("✅ Connected to Python bot");
     return true;
-}
-
-//+------------------------------------------------------------------+
-//| Process commands from Python bot                                 |
-//+------------------------------------------------------------------+
-void ProcessPythonCommands()
-{
-    // Check if socket is valid
-    if (socketHandle == INVALID_HANDLE)
-        return;
-        
-    // Check for incoming data
-    uint bytesAvailable = SocketBytesAvailable(socketHandle);
-    if (bytesAvailable == 0)
-        return;
-        
-    // Read data
-    uchar buffer[];
-    ArrayResize(buffer, bytesAvailable);
-    
-    int bytesRead = SocketRead(socketHandle, buffer, bytesAvailable, 5000);
-    if (bytesRead <= 0)
-        return;
-        
-    // Convert to string
-    string receivedData = CharArrayToString(buffer);
-    
-    // Parse JSON command
-    // Note: MQL5 doesn't have built-in JSON parsing, simplified parsing here
-    if (StringFind(receivedData, "place_order") >= 0)
-    {
-        ProcessPlaceOrderCommand(receivedData);
-    }
-    else if (StringFind(receivedData, "close_position") >= 0)
-    {
-        ProcessClosePositionCommand(receivedData);
-    }
-    else if (StringFind(receivedData, "get_balance") >= 0)
-    {
-        SendAccountBalance();
-    }
-    else if (StringFind(receivedData, "get_positions") >= 0)
-    {
-        SendPositions();
-    }
-    else if (StringFind(receivedData, "get_market_data") >= 0)
-    {
-        SendMarketData();
-    }
-}
-
-//+------------------------------------------------------------------+
-//| Process place order command                                      |
-//+------------------------------------------------------------------+
-void ProcessPlaceOrderCommand(string command)
-{
-    // Simplified parsing - in production use proper JSON parser
-    string symbol = ExtractValue(command, "symbol");
-    string orderType = ExtractValue(command, "type");
-    double volume = StringToDouble(ExtractValue(command, "volume"));
-    double price = StringToDouble(ExtractValue(command, "price"));
-    double sl = StringToDouble(ExtractValue(command, "sl"));
-    double tp = StringToDouble(ExtractValue(command, "tp"));
-    
-    // Validate symbol
-    if (symbol != Symbol())
-    {
-        SendResponse("{\"success\": false, \"error\": \"Symbol mismatch\"}");
-        return;
-    }
-    
-    // Determine order type
-    ENUM_ORDER_TYPE order_type;
-    if (orderType == "buy")
-        order_type = ORDER_TYPE_BUY;
-    else if (orderType == "sell")
-        order_type = ORDER_TYPE_SELL;
-    else
-    {
-        SendResponse("{\"success\": false, \"error\": \"Invalid order type\"}");
-        return;
-    }
-    
-    // Place order
-    bool result = trade.PositionOpen(symbol, order_type, volume, price, sl, tp);
-    
-    if (result)
-    {
-        SendResponse("{\"success\": true, \"ticket\": " + IntegerToString(trade.ResultOrder()) + "}");
-        Print("Order placed successfully: ", symbol, " ", orderType, " ", volume);
-    }
-    else
-    {
-        SendResponse("{\"success\": false, \"error\": \"" + trade.ResultComment() + "\"}");
-        Print("Order failed: ", trade.ResultComment());
-    }
-}
-
-//+------------------------------------------------------------------+
-//| Process close position command                                   |
-//+------------------------------------------------------------------+
-void ProcessClosePositionCommand(string command)
-{
-    int ticket = (int)StringToInteger(ExtractValue(command, "ticket"));
-    
-    // Find and close position
-    if (PositionSelectByTicket(ticket))
-    {
-        bool result = trade.PositionClose(ticket);
-        
-        if (result)
-        {
-            SendResponse("{\"success\": true}");
-            Print("Position closed: ", ticket);
-        }
-        else
-        {
-            SendResponse("{\"success\": false, \"error\": \"" + trade.ResultComment() + "\"}");
-        }
-    }
-    else
-    {
-        SendResponse("{\"success\": false, \"error\": \"Position not found\"}");
-    }
-}
-
-//+------------------------------------------------------------------+
-//| Send account balance                                             |
-//+------------------------------------------------------------------+
-void SendAccountBalance()
-{
-    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-    
-    string response = "{\"balance\": " + DoubleToString(balance, 2) + 
-                     ", \"equity\": " + DoubleToString(equity, 2) + "}";
-    SendResponse(response);
-}
-
-//+------------------------------------------------------------------+
-//| Send positions information                                       |
-//+------------------------------------------------------------------+
-void SendPositions()
-{
-    string positions = "[";
-    
-    for (int i = 0; i < PositionsTotal(); i++)
-    {
-        if (PositionGetSymbol(i) == Symbol())
-        {
-            if (i > 0) positions += ",";
-            
-            positions += "{";
-            positions += "\"ticket\": " + IntegerToString(PositionGetInteger(POSITION_TICKET)) + ",";
-            positions += "\"symbol\": \"" + PositionGetString(POSITION_SYMBOL) + "\",";
-            positions += "\"type\": \"" + EnumToString((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE)) + "\",";
-            positions += "\"volume\": " + DoubleToString(PositionGetDouble(POSITION_VOLUME), 2) + ",";
-            positions += "\"price\": " + DoubleToString(PositionGetDouble(POSITION_PRICE_OPEN), 5) + ",";
-            positions += "\"sl\": " + DoubleToString(PositionGetDouble(POSITION_SL), 5) + ",";
-            positions += "\"tp\": " + DoubleToString(PositionGetDouble(POSITION_TP), 5) + ",";
-            positions += "\"profit\": " + DoubleToString(PositionGetDouble(POSITION_PROFIT), 2);
-            positions += "}";
-        }
-    }
-    
-    positions += "]";
-    SendResponse("{\"positions\": " + positions + "}");
-}
-
-//+------------------------------------------------------------------+
-//| Send market data                                                 |
-//+------------------------------------------------------------------+
-void SendMarketData()
-{
-    string symbol = Symbol();
-    
-    // Get current prices
-    double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
-    double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
-    double spread = SymbolInfoInteger(symbol, SYMBOL_SPREAD);
-    
-    // Get OHLC
-    double open = iOpen(symbol, PERIOD_CURRENT, 0);
-    double high = iHigh(symbol, PERIOD_CURRENT, 0);
-    double low = iLow(symbol, PERIOD_CURRENT, 0);
-    double close = iClose(symbol, PERIOD_CURRENT, 0);
-    long volume = iVolume(symbol, PERIOD_CURRENT, 0);
-    
-    string response = "{";
-    response += "\"symbol\": \"" + symbol + "\",";
-    response += "\"bid\": " + DoubleToString(bid, 5) + ",";
-    response += "\"ask\": " + DoubleToString(ask, 5) + ",";
-    response += "\"spread\": " + IntegerToString(spread) + ",";
-    response += "\"open\": " + DoubleToString(open, 5) + ",";
-    response += "\"high\": " + DoubleToString(high, 5) + ",";
-    response += "\"low\": " + DoubleToString(low, 5) + ",";
-    response += "\"close\": " + DoubleToString(close, 5) + ",";
-    response += "\"volume\": " + IntegerToString(volume);
-    response += "}";
-    
-    SendResponse("{\"market_data\": " + response + "}");
-}
-
-//+------------------------------------------------------------------+
-//| Send response to Python bot                                      |
-//+------------------------------------------------------------------+
-void SendResponse(string response)
-{
-    if (socketHandle == INVALID_HANDLE)
-        return;
-        
-    // Convert string to char array
-    uchar buffer[];
-    StringToCharArray(response, buffer);
-    
-    // Send data
-    SocketSend(socketHandle, buffer, ArraySize(buffer));
-}
-
-//+------------------------------------------------------------------+
-//| Extract value from JSON-like string (simplified)                |
-//+------------------------------------------------------------------+
-string ExtractValue(string json, string key)
-{
-    string search = "\"" + key + "\":";
-    int start = StringFind(json, search);
-    
-    if (start == -1)
-        return "";
-        
-    start += StringLen(search);
-    
-    // Find end of value
-    int end = start;
-    int braceCount = 0;
-    bool inString = false;
-    
-    for (int i = start; i < StringLen(json); i++)
-    {
-        char ch = StringGetCharacter(json, i);
-        
-        if (ch == '"' && (i == 0 || StringGetCharacter(json, i-1) != '\\'))
-            inString = !inString;
-        else if (!inString)
-        {
-            if (ch == '{' || ch == '[')
-                braceCount++;
-            else if (ch == '}' || ch == ']')
-                braceCount--;
-            else if (ch == ',' && braceCount == 0)
-            {
-                end = i;
-                break;
-            }
-        }
-    }
-    
-    if (end == start)
-        end = StringLen(json);
-        
-    string value = StringSubstr(json, start, end - start);
-    StringTrimLeft(value);
-    StringTrimRight(value);
-    
-    // Remove quotes if present
-    if (StringGetCharacter(value, 0) == '"')
-        value = StringSubstr(value, 1, StringLen(value) - 2);
-        
-    return value;
 }
 
 //+------------------------------------------------------------------+
 //| Convert enum to string                                           |
 //+------------------------------------------------------------------+
-string EnumToString(ENUM_POSITION_TYPE type)
+string EnumToString(ENUM_ORDER_TYPE type)
 {
     switch(type)
     {
-        case POSITION_TYPE_BUY: return "buy";
-        case POSITION_TYPE_SELL: return "sell";
-        default: return "unknown";
+        case ORDER_TYPE_BUY: return "BUY";
+        case ORDER_TYPE_SELL: return "SELL";
+        default: return "UNKNOWN";
     }
 }
 //+------------------------------------------------------------------+

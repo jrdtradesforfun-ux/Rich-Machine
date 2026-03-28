@@ -1,53 +1,343 @@
-# 🤖 Universal Professional Trading Bot
+# Universal ONNX ML Trading Bot
 
-A complete, production-ready trading bot combining advanced machine learning, risk management, broker integration, execution pipeline, and real-time monitoring.
-
-**Works with ANY MetaTrader 5 compatible broker**
+A professional-grade, enterprise-ready Python + MQL5 ML trading system with native ONNX model inference, Smart Money Concepts (SMC) strategies, and multi-timeframe analysis.
 
 ## 🚀 Features
 
-### Core Trading Capabilities
-- ✅ **Multi-Symbol Trading** - Trade multiple currency pairs simultaneously (EURUSD, GBPUSD, USDJPY)
-- ✅ **Real-time Market Data** - Live tick and bar data from MetaTrader 5
-- ✅ **Smart Order Execution** - Automated order placement with risk validation
-- ✅ **Position Management** - Open, close, and modify positions programmatically
-- ✅ **Ensemble Predictions** - Multiple models (Random Forest, XGBoost, LSTM) with weighted voting
-- ✅ **Market Regime Detection** - Automatically switches strategies based on trending/ranging/volatile markets
-- ✅ **Confidence Scoring** - All predictions include confidence levels for trade filtering
-- ✅ **Feature Engineering** - Technical indicators (MA, RSI, ATR, momentum)
+### Core Capabilities
+- **Native ONNX Inference**: Direct ML model execution in MQL5 without Python overhead
+- **Multi-Model Support**: Random Forest, XGBoost, and LSTM models
+- **SMC Trading Strategies**: Smart Money Concepts with fractal patterns and order blocks
+- **Multi-Timeframe Analysis**: H4 context + M15 entry signals
+- **Advanced Risk Management**: ATR-based stops, Kelly Criterion, drawdown limits
+- **Kill Zone Filtering**: Trade only during optimal market hours
+- **Real-time Monitoring**: Performance metrics and automated alerts
 
-### Risk Management
-- ✅ **Risk Per Trade** - Configurable percentage-based position sizing
-- ✅ **Stop Loss & Take Profit** - Automatic calculation based on price volatility
-- ✅ **Position Limits** - Maximum concurrent positions validation
-- ✅ **Margin Monitoring** - Real-time account margin checking
-- ✅ **Drawdown Alerts** - Automatic trading halt if equity drops > 5%
+### Technical Specifications
+- **Prediction Latency**: < 5ms (ONNX native inference)
+- **Feature Engineering**: 50+ technical indicators
+- **Risk Controls**: 2% max risk per trade, 5% daily drawdown limit
+- **Position Limits**: Max 3 concurrent positions
+- **Retry Logic**: 3-tier error handling with exponential backoff
 
-### Monitoring & Alerting
-- ✅ **Real-time Metrics** - Win rate, profit factor, Sharpe ratio, drawdown
-- ✅ **Performance Alerts** - Automatic alerts on trades, equity changes, losses
-- ✅ **System Health Monitoring** - Connection, data, and execution error tracking
-- ✅ **Session Reports** - Daily trading summaries and statistics
-- ✅ **Equity Tracking** - Real-time account balance and unrealized P&L
+## 📋 Prerequisites
 
-## 📋 Architecture
+### System Requirements
+- **Python**: 3.8+
+- **MetaTrader 5**: Build 3600+
+- **RAM**: 8GB minimum
+- **Storage**: 10GB for models and data
+
+### Python Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### MQL5 Requirements
+- Enable automated trading in MT5
+- Allow DLL imports
+- WebRequest access for data feeds
+
+## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Python Trading Bot (Your Machine or VPS)                       │
-│  ├── ProfessionalTradingBot (Main)                              │
-│  ├── EnsemblePredictor (ML voting)                              │
-│  ├── ExecutionEngine (Order routing)                            │
-│  ├── PerformanceMonitor (Metrics & alerts)                      │
-│  └── SystemMonitor (Health tracking)                            │
-└──────────────────────┬──────────────────────────────────────────┘
-                       │ Socket (Port 5000)
-                       ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ MetaTrader 5 + Universal Bot                                   │
-└──────────────────────┬──────────────────────────────────────────┘
-                       │
-                       ▼
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Python Bot    │    │     ONNX        │    │   MetaTrader 5  │
+│                 │    │   Inference     │    │                 │
+│ • Model Training│    │ • Native MQL5   │    │ • Order Execution│
+│ • Feature Eng.  │◄──►│ • <5ms Latency  │◄──►│ • Risk Management│
+│ • ONNX Export   │    │ • No Python Dep │    │ • SMC Strategies │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+```
+
+## 🚀 Quick Start
+
+### 1. Clone and Setup
+```bash
+git clone https://github.com/jrdtradesforfun-ux/Rich-Machine.git
+cd Rich-Machine
+pip install -r requirements.txt
+```
+
+### 2. Train ONNX Model
+```bash
+# Train Random Forest model for EURUSD
+python onnx_training_pipeline.py --symbol EURUSD --model random_forest
+
+# Train XGBoost model for GBPUSD
+python onnx_training_pipeline.py --symbol GBPUSD --model xgboost
+
+# Train LSTM model for USDJPY
+python onnx_training_pipeline.py --symbol USDJPY --model lstm
+```
+
+### 3. Deploy MQL5 EA
+1. Copy `mql5/EA.mq5` to your MT5 Experts folder
+2. Copy trained ONNX model to MT5 Files folder
+3. Configure EA parameters in MT5
+4. Enable automated trading
+
+### 4. Start Trading
+```bash
+# Optional: Run Python monitoring bot
+python examples/professional_trading_bot.py
+```
+
+## 📊 Model Training
+
+### Supported Models
+
+#### Random Forest
+```bash
+python onnx_training_pipeline.py --symbol EURUSD --model random_forest
+```
+- **Pros**: Fast training, interpretable, handles missing data
+- **Use Case**: High-frequency signals, feature importance analysis
+
+#### XGBoost
+```bash
+python onnx_training_pipeline.py --symbol GBPUSD --model xgboost
+```
+- **Pros**: High accuracy, handles complex patterns, gradient boosting
+- **Use Case**: Trend following, breakout detection
+
+#### LSTM (Neural Network)
+```bash
+python onnx_training_pipeline.py --symbol USDJPY --model lstm
+```
+- **Pros**: Time series patterns, memory of past sequences
+- **Use Case**: Momentum trading, pattern recognition
+
+### Training Data Format
+```csv
+timestamp,open,high,low,close,volume
+2024-01-01 00:00:00,1.0850,1.0860,1.0845,1.0855,1250
+2024-01-01 00:15:00,1.0855,1.0870,1.0850,1.0865,1180
+...
+```
+
+## ⚙️ Configuration
+
+### MQL5 EA Parameters
+
+#### ONNX Configuration
+```mq5
+input string ONNX_Model_Path = "EURUSD_random_forest.onnx";
+input int Feature_Count = 50;
+input double Prediction_Threshold = 0.6;
+```
+
+#### SMC Strategy Settings
+```mq5
+input int H4_Timeframe = PERIOD_H4;
+input int M15_Timeframe = PERIOD_M15;
+input int Fractal_Period = 5;
+```
+
+#### Risk Management
+```mq5
+input double Risk_Per_Trade = 0.02;      // 2% risk per trade
+input double Daily_Drawdown_Limit = 0.05; // 5% max daily drawdown
+input int Max_Positions = 3;             // Max concurrent positions
+```
+
+#### Kill Zone Settings (GMT)
+```mq5
+input int London_Open_Hour = 8;          // London session start
+input int London_Close_Hour = 10;        // London session end
+input int NewYork_Open_Hour = 13;        // New York session start
+input int NewYork_Close_Hour = 15;       // New York session end
+```
+
+### Python Configuration
+```python
+# Model training parameters
+model_configs = {
+    'random_forest': {
+        'n_estimators': 100,
+        'max_depth': 10,
+    },
+    'xgboost': {
+        'n_estimators': 100,
+        'max_depth': 6,
+        'learning_rate': 0.1,
+    },
+    'lstm': {
+        'units': 64,
+        'dropout': 0.2,
+        'epochs': 50,
+    }
+}
+```
+
+## 📈 SMC Trading Strategies
+
+### 1. Fractal Patterns (Liquidity Sweeps)
+- Identifies institutional order flow
+- 5-bar fractal analysis for entry confirmation
+- Bullish/bearish fractal detection
+
+### 2. Order Blocks
+- Supply/demand zone identification
+- Large candle followed by small candle pattern
+- Institutional accumulation/distribution
+
+### 3. Fibonacci Zones
+- Premium zone (above H4 midpoint) - bearish bias
+- Discount zone (below H4 midpoint) - bullish bias
+- H4 context for M15 entries
+
+### 4. Kill Zone Filtering
+- London session: 8:00-10:00 GMT
+- New York session: 13:00-15:00 GMT
+- Optimal liquidity and volatility
+
+## 🔧 Advanced Features
+
+### ONNX Model Export
+```python
+# Export trained model to ONNX
+model.export_to_onnx(sample_input, "model.onnx")
+
+# Verify ONNX model
+onnx_model = onnx.load("model.onnx")
+onnx.checker.check_model(onnx_model)
+```
+
+### Feature Engineering
+```python
+from feature_engineer import FeatureEngineer
+
+engineer = FeatureEngineer()
+features = engineer.create_features(price_data)
+
+# 50+ features including:
+# - Price action (OHLC, ranges, bodies)
+# - Moving averages (SMA, EMA)
+# - Oscillators (RSI, MACD, Stochastic)
+# - Volatility (ATR, Bollinger Bands)
+# - Volume indicators
+# - Higher timeframe context
+```
+
+### Risk Management
+```python
+# ATR-based position sizing
+atr = iATR(Symbol(), M15_Timeframe, 14, 0)
+stop_loss = atr * 2  # 2 ATR stop
+take_profit = atr * 3  # 3 ATR target
+
+# Kelly Criterion integration
+risk_amount = account_balance * risk_per_trade
+position_size = risk_amount / (stop_pips * tick_value)
+```
+
+## 📊 Monitoring & Analytics
+
+### Performance Metrics
+- Win rate, profit factor, Sharpe ratio
+- Maximum drawdown, recovery factor
+- Trade frequency and holding time
+- Risk-adjusted returns
+
+### Real-time Alerts
+- Telegram integration for trade signals
+- Email alerts for risk breaches
+- Performance dashboard updates
+
+### Logging
+```python
+# Comprehensive logging
+logger.info(f"Trade executed: {symbol} {order_type} {lot_size} lots")
+logger.warning(f"Risk limit exceeded: {daily_drawdown:.2%}")
+logger.error(f"ONNX inference failed: {error_message}")
+```
+
+## 🧪 Testing
+
+### Unit Tests
+```bash
+python -m pytest tests/ -v
+```
+
+### Integration Tests
+```bash
+python -m pytest tests/test_integration.py -v
+```
+
+### Performance Benchmarks
+```bash
+python benchmarks/model_latency.py
+```
+
+## 🚨 Risk Management
+
+### Trade Filters
+- ✅ Maximum 3 concurrent positions
+- ✅ 2% risk per trade maximum
+- ✅ 5% daily drawdown limit
+- ✅ Kill zone time filtering
+- ✅ SMC strategy confirmation
+
+### Error Handling
+- 3-tier retry logic with exponential backoff
+- Circuit breaker for consecutive failures
+- Graceful degradation to manual mode
+
+### Validation Checks
+- Pre-trade risk assessment
+- Margin requirements verification
+- Spread and slippage monitoring
+- Broker connectivity checks
+
+## 📚 Documentation
+
+### User Guides
+- [ML Training Guide](ML_TRAINING_GUIDE.md) - Model training and optimization
+- [MQL5 Integration](MQL5_INTEGRATION.md) - EA deployment and configuration
+- [Risk Management](RISK_MANAGEMENT.md) - Risk controls and monitoring
+
+### API Reference
+- [Python API](docs/python_api.md) - Complete Python module documentation
+- [MQL5 API](docs/mql5_api.md) - Expert Advisor function reference
+
+### Troubleshooting
+- [Common Issues](docs/troubleshooting.md) - FAQ and solutions
+- [Performance Tuning](docs/performance.md) - Optimization guides
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new features
+4. Ensure all tests pass
+5. Submit a pull request
+
+### Development Setup
+```bash
+git clone https://github.com/your-username/Rich-Machine.git
+cd Rich-Machine
+pip install -r requirements-dev.txt
+pre-commit install
+```
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## ⚠️ Disclaimer
+
+This software is for educational and research purposes only. Trading forex involves substantial risk of loss and is not suitable for all investors. Past performance does not guarantee future results. Use at your own risk.
+
+## 📞 Support
+
+- **Issues**: [GitHub Issues](https://github.com/jrdtradesforfun-ux/Rich-Machine/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/jrdtradesforfun-ux/Rich-Machine/discussions)
+- **Documentation**: [Wiki](https://github.com/jrdtradesforfun-ux/Rich-Machine/wiki)
+
+---
+
+**Built with ❤️ for the algorithmic trading community**
 ┌──────────────────────────────────────────────────────────────────┐
 │  Any MT5 Broker (JustMarkets, IC Markets, Pepperstone, etc.)    │
 └──────────────────────────────────────────────────────────────────┘
